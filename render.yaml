@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: mortybot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python discord_bot.py
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: SHAPESINC_API_KEY
+        sync: false
+      - key: SHAPESINC_SHAPE_USERNAME
+        value: shaperobot
+      - key: PYTHON_VERSION
+        value: 3.11.0
+    autoDeploy: true
+    healthCheckPath: /health
+    disk:
+      name: mortybot-disk
+      mountPath: /opt/render/project/src
+      sizeGB: 1
