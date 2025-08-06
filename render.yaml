@@ -1,10 +1,12 @@
 services:
   - type: web
-    name: mortybot
+    name: mortbot
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python discord_bot.py
+    healthCheckPath: /health
+    autoDeploy: true
     envVars:
       - key: DISCORD_TOKEN
         sync: false
@@ -14,6 +16,12 @@ services:
         value: shaperobot
       - key: PYTHON_VERSION
         value: 3.11.0
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: PYTHONDONTWRITEBYTECODE
+        value: "1"
+    # Render will automatically restart the service if it crashes
+    # The bot includes its own restart logic as well for redundancy
     autoDeploy: true
     healthCheckPath: /health
     disk:

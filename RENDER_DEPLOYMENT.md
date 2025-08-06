@@ -1,77 +1,122 @@
-# Render Deployment Guide for MortyBot
+# Discord Bot 24/7 Deployment Guide for Render
 
-This guide will help you deploy the Discord bot to Render with automatic keep-alive functionality.
+This comprehensive guide will help you deploy your Discord bot to Render with maximum uptime reliability, including multiple redundancy layers and monitoring systems.
 
 ## Prerequisites
 
-1. **GitHub Repository**: The code is already pushed to `https://github.com/Replikas/mortbot`
-2. **Render Account**: Sign up at [render.com](https://render.com)
-3. **Discord Bot Token**: From [Discord Developer Portal](https://discord.com/developers/applications)
-4. **Shapes API Key**: From [shapes.inc](https://shapes.inc)
+1. A Discord bot token (from Discord Developer Portal)
+2. A Shapes API key (from shapes.inc)
+3. A GitHub account
+4. A Render account (free tier works)
 
-## Deployment Steps
+## Step-by-Step Deployment
 
-### 1. Connect GitHub Repository
+### 1. Prepare Your Repository
 
-1. Log into your Render dashboard
-2. Click "New +" → "Web Service"
-3. Connect your GitHub account if not already connected
-4. Select the `Replikas/mortbot` repository
-5. Click "Connect"
+Ensure your repository contains:
+- `discord_bot.py` (main bot file with comprehensive uptime features)
+- `requirements.txt` (Python dependencies including psutil)
+- `render.yaml` (Render configuration with health checks)
+- `.env.example` (environment variables template)
+- `uptime_monitor.py` (optional external monitoring script)
 
-### 2. Configure Service Settings
+### 2. Deploy to Render
 
-**Basic Settings:**
-- **Name**: `mortybot` (or your preferred name)
-- **Environment**: `Python 3`
-- **Region**: Choose closest to your users
-- **Branch**: `main`
-- **Build Command**: `pip install -r requirements.txt`
-- **Start Command**: `python discord_bot.py`
+1. **Connect Repository**:
+   - Go to [Render Dashboard](https://dashboard.render.com/)
+   - Click "New +" → "Web Service"
+   - Connect your GitHub repository
+   - Select the repository containing your bot
 
-**Advanced Settings:**
-- **Plan**: Free (or paid for better performance)
-- **Auto-Deploy**: ✅ Enabled
+2. **Configure Service**:
+   - **Name**: Choose a name for your service (e.g., "mortbot")
+   - **Environment**: Python 3
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `python discord_bot.py`
+   - **Plan**: Free (or paid for better performance)
+   - **Health Check Path**: `/health` (automatically configured)
 
-### 3. Set Environment Variables
+3. **Set Environment Variables**:
+   Go to the "Environment" tab and add:
+   ```
+   DISCORD_TOKEN=your_discord_bot_token_here
+   SHAPESINC_API_KEY=your_shapes_api_key_here
+   SHAPESINC_SHAPE_USERNAME=shaperobot
+   ```
 
-In the Render dashboard, add these environment variables:
+### 3. Environment Variables
 
-| Key | Value | Notes |
-|-----|-------|-------|
-| `DISCORD_TOKEN` | `your_discord_bot_token` | Required |
-| `SHAPESINC_API_KEY` | `your_shapes_api_key` | Required |
-| `SHAPESINC_SHAPE_USERNAME` | `shaperobot` | Optional (default: shaperobot) |
-| `PORT` | `10000` | Auto-set by Render |
-| `PYTHON_VERSION` | `3.11.0` | Optional |
+#### Required Variables:
+- `DISCORD_TOKEN`: Your Discord bot token
+- `SHAPESINC_API_KEY`: Your Shapes API key
 
-### 4. Deploy
+#### Optional Variables:
+- `SHAPESINC_SHAPE_USERNAME`: Username for Shapes API (default: "shaperobot")
 
-1. Click "Create Web Service"
-2. Render will automatically build and deploy your bot
-3. Monitor the build logs for any errors
-4. Once deployed, the bot should appear online in Discord
+#### Auto-configured by Render:
+- `PORT`: Automatically set by Render for the web server
+- `PYTHON_VERSION`: Set to 3.11.0 in render.yaml
+- `PYTHONUNBUFFERED`: Set to "1" for immediate log output
+- `PYTHONDONTWRITEBYTECODE`: Set to "1" for better performance
 
-## Keep-Alive Features
+## 24/7 Uptime Features
 
-The bot includes several features to prevent Render's free tier from sleeping:
+This bot includes multiple layers of redundancy to ensure maximum uptime:
 
-### 1. Health Check Endpoint
-- **URL**: `https://your-app-name.onrender.com/health`
-- **Purpose**: Allows Render to monitor service health
-- **Response**: JSON with bot status
+### 1. Web Server with Health Monitoring
+- **Health Check**: `GET /health` - Returns comprehensive bot status, metrics, and system info
+- **Ping Endpoint**: `GET /ping` - Simple pong response for keep-alive
+- **Auto Port Detection**: Uses Render's `PORT` environment variable
+- **System Metrics**: Memory usage, CPU usage, bot latency, guild count
 
-### 2. Self-Ping Mechanism
-- **Frequency**: Every 14 minutes
-- **Purpose**: Keeps the service active
-- **Endpoint**: `https://your-app-name.onrender.com/ping`
+### 2. Multi-Layer Keep-Alive System
+- **Self-Ping**: Pings itself every 14 minutes to prevent sleeping
+- **Health Monitoring**: Tracks health check failures and restarts web server if needed
+- **Heartbeat Tracking**: Monitors last successful ping timestamp
+- **Failure Threshold**: Restarts after 5 consecutive health check failures
 
-### 3. Web Server
-- **Port**: Uses Render's `PORT` environment variable
-- **Endpoints**:
-  - `/` - Basic ping endpoint
-  - `/health` - Health check
-  - `/ping` - Keep-alive ping
+### 3. Comprehensive Error Handling
+- **Connection Monitoring**: Tracks Discord disconnections and reconnections
+- **Critical Error Detection**: Automatically restarts on connection/network errors
+- **Graceful Restart**: Properly shuts down tasks before restarting
+- **Exponential Backoff**: Intelligent retry timing to avoid rate limits
+
+### 4. System Monitoring
+- **Memory Management**: Monitors memory usage and triggers garbage collection
+- **CPU Monitoring**: Tracks CPU usage and logs warnings
+- **Latency Monitoring**: Detects high bot latency and takes corrective action
+- **Activity Tracking**: Monitors message processing activity
+
+### 5. Watchdog Timer
+- **Responsiveness Check**: Detects if bot becomes unresponsive
+- **Stuck Detection**: Identifies when bot appears frozen or stuck
+- **Automatic Recovery**: Triggers graceful restart when issues detected
+- **Latency Threshold**: Restarts if latency exceeds 5 seconds
+
+### 6. Auto-Restart System
+- **Crash Recovery**: Automatically restarts bot on crashes
+- **Connection Recovery**: Handles Discord API connection issues
+- **Resource Recovery**: Manages memory leaks and resource exhaustion
+- **Process Restart**: Falls back to process restart if graceful restart fails
+
+## External Monitoring (Optional)
+
+For additional reliability, you can run the external monitoring script:
+
+### Setting Up External Monitor
+1. Deploy `uptime_monitor.py` as a separate service or run locally
+2. Set environment variables:
+   ```
+   BOT_URL=https://your-bot-service.onrender.com
+   CHECK_INTERVAL=300
+   WEBHOOK_URL=your_discord_webhook_url_for_alerts
+   MAX_FAILURES=3
+   ```
+3. The monitor will:
+   - Check bot health every 5 minutes
+   - Send alerts to Discord webhook on failures
+   - Keep detailed logs of uptime status
+   - Ping bot to maintain activity
 
 ## Monitoring
 

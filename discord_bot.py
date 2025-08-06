@@ -16,6 +16,11 @@ import traceback
 from datetime import datetime
 import psutil
 import gc
+import signal
+import time
+import random
+from typing import Optional
+import json
 sys.path.append(os.path.join(os.path.dirname(__file__), 'examples', 'basic', 'python'))
 from utils import get_api_base_url
 
@@ -47,6 +52,17 @@ api_url = None
 app = web.Application()
 runner = None
 site = None
+
+# Health monitoring variables
+last_heartbeat = datetime.now()
+bot_start_time = datetime.now()
+restart_count = 0
+max_restarts = 10
+health_check_failures = 0
+max_health_failures = 5
+last_message_time = datetime.now()
+connection_lost_count = 0
+watchdog_enabled = True
 
 # Health check endpoint
 async def health_check(request):
@@ -80,6 +96,17 @@ async def health_check(request):
         if memory.percent > 80:
             logger.warning(f"High memory usage: {memory.percent}%")
         
+        global last_heartbeat
+        last_heartbeat = datetime.now()
+        
+        # Add additional health metrics
+        health_data.update({
+            "restart_count": restart_count,
+            "last_heartbeat": last_heartbeat.isoformat(),
+            "health_failures": health_check_failures,
+            "uptime_seconds": (datetime.now() - bot_start_time).total_seconds()
+        })
+        
         return web.json_response(health_data, status=200)
     except Exception as e:
         logger.error(f"Health check error: {e}")
@@ -89,6 +116,21 @@ async def health_check(request):
 async def ping(request):
     """Ping endpoint for keep-alive"""
     return web.json_response({"message": "pong", "timestamp": datetime.now().isoformat()})
+
+# Restart web server function
+async def restart_web_server():
+    """Restart the web server"""
+    global runner, site
+    try:
+        if site:
+            await site.stop()
+        if runner:
+            await runner.cleanup()
+        
+        await setup_web_server()
+        logger.info("Web server restarted successfully")
+    except Exception as e:
+        logger.error(f"Failed to restart web server: {e}")
 
 # Setup web server for health checks and keep-alive
 async def setup_web_server():
@@ -109,6 +151,7 @@ async def setup_web_server():
 @tasks.loop(minutes=14)  # Ping every 14 minutes (Render sleeps after 15 minutes of inactivity)
 async def keep_alive():
     """Ping the bot every 14 minutes to prevent Render from sleeping"""
+    global health_check_failures, last_heartbeat
     try:
         port = os.getenv('PORT', '8000')
         url = f"http://localhost:{port}/ping"
@@ -117,23 +160,37 @@ async def keep_alive():
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
                 if response.status == 200:
                     logger.info(f"Keep-alive ping successful at {datetime.now()}")
+                    health_check_failures = 0  # Reset failure count on success
+                    last_heartbeat = datetime.now()
                 else:
                     logger.warning(f"Keep-alive ping returned status {response.status}")
+                    health_check_failures += 1
+                    if health_check_failures >= max_health_failures:
+                        logger.error(f"Health check failed {health_check_failures} times, restarting web server")
+                        await restart_web_server()
+                        health_check_failures = 0
     except Exception as e:
         logger.error(f"Keep-alive ping failed: {e}")
-        # Try to restart the web server if ping fails
-        try:
-            await setup_web_server()
-            logger.info("Web server restarted after ping failure")
-        except Exception as restart_error:
-            logger.error(f"Failed to restart web server: {restart_error}")
+        health_check_failures += 1
+        if health_check_failures >= max_health_failures:
+            logger.error(f"Health check failed {health_check_failures} times, restarting web server")
+            await restart_web_server()
+            health_check_failures = 0
 
 @tasks.loop(minutes=30)
 async def system_monitor():
     """Monitor system resources and bot health"""
+    global last_heartbeat
     try:
         # Memory monitoring
         memory = psutil.virtual_memory()
+        process = psutil.Process()
+        memory_mb = process.memory_info().rss / 1024 / 1024
+        cpu_percent = process.cpu_percent()
+        
+        # Check if heartbeat is recent (within last 20 minutes)
+        heartbeat_age = (datetime.now() - last_heartbeat).total_seconds() / 60
+        
         if memory.percent > 85:
             logger.warning(f"High memory usage: {memory.percent}% - Running garbage collection")
             gc.collect()
@@ -144,20 +201,34 @@ async def system_monitor():
             if latency > 1000:
                 logger.warning(f"High bot latency: {latency}ms")
             
-            logger.info(f"System Health - Memory: {memory.percent}%, Latency: {latency}ms, Guilds: {len(bot.guilds)}")
+            logger.info(f"System Health - Memory: {memory_mb:.1f}MB ({memory.percent}%), CPU: {cpu_percent:.1f}%, Latency: {latency}ms, Guilds: {len(bot.guilds)}, Heartbeat Age: {heartbeat_age:.1f}min")
         else:
             logger.warning("Bot is not ready - potential connection issue")
+        
+        # Check for stale heartbeat
+        if heartbeat_age > 20:
+            logger.error(f"Stale heartbeat detected: {heartbeat_age:.1f} minutes old")
+            await restart_web_server()
+        
+        # Check message activity (if no messages in 2 hours, something might be wrong)
+        message_age = (datetime.now() - last_message_time).total_seconds() / 3600
+        if message_age > 2:
+            logger.warning(f"No message activity for {message_age:.1f} hours")
             
     except Exception as e:
         logger.error(f"System monitor error: {e}")
 
 @bot.event
 async def on_ready():
-    global shapes_client, shape_username, model, api_url
+    global shapes_client, shape_username, model, api_url, last_message_time, connection_lost_count
     
     logger.info(f'{bot.user} has connected to Discord!')
     logger.info(f'Bot is in {len(bot.guilds)} guilds')
     logger.info(f'Bot latency: {round(bot.latency * 1000)}ms')
+    
+    # Reset connection counters on successful connection
+    connection_lost_count = 0
+    last_message_time = datetime.now()
     
     # Start web server for health checks
     try:
@@ -181,6 +252,14 @@ async def on_ready():
             logger.info("System monitor task started")
     except Exception as e:
         logger.error(f'Failed to start system monitor task: {e}')
+    
+    # Start watchdog timer
+    try:
+        if not watchdog_timer.is_running():
+            watchdog_timer.start()
+            logger.info("Watchdog timer started")
+    except Exception as e:
+        logger.error(f'Failed to start watchdog timer: {e}')
     
     # Initialize Shapes API client
     try:
@@ -212,6 +291,8 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
+    global last_message_time
+    
     # Don't respond to bot's own messages
     if message.author == bot.user:
         return
@@ -219,6 +300,9 @@ async def on_message(message):
     # Don't respond to other bots
     if message.author.bot:
         return
+    
+    # Update last message time for watchdog
+    last_message_time = datetime.now()
     
     try:
         # Process commands first
@@ -231,6 +315,11 @@ async def on_message(message):
     except Exception as e:
         logger.error(f"Critical error in on_message: {e}")
         logger.error(f"Traceback: {traceback.format_exc()}")
+        
+        # Check for critical errors
+        if any(critical in str(e).lower() for critical in ['connection', 'timeout', 'ssl', 'socket', 'network']):
+            logger.error("Critical error in message processing, may need restart")
+            asyncio.create_task(restart_bot_gracefully())
 
 async def handle_shapes_response(message, max_retries=3):
     """Handle responses using the Shapes API with retry logic"""
@@ -428,17 +517,32 @@ async def help_shapes(ctx):
 @bot.event
 async def on_disconnect():
     """Handle bot disconnection"""
-    logger.warning("Bot disconnected from Discord")
+    global connection_lost_count
+    connection_lost_count += 1
+    logger.warning(f"Bot disconnected from Discord (disconnect #{connection_lost_count})")
+    
+    # If too many disconnections, try to restart
+    if connection_lost_count > 5:
+        logger.error(f"Too many disconnections ({connection_lost_count}), attempting restart")
+        await restart_bot_gracefully()
 
 @bot.event
 async def on_resumed():
     """Handle bot reconnection"""
+    global connection_lost_count
     logger.info("Bot resumed connection to Discord")
+    connection_lost_count = max(0, connection_lost_count - 1)  # Reduce disconnect count on resume
 
 @bot.event
 async def on_error(event, *args, **kwargs):
     """Handle Discord.py errors"""
-    logger.error(f"Discord error in event {event}: {traceback.format_exc()}")
+    error_msg = traceback.format_exc()
+    logger.error(f"Discord error in event {event}: {error_msg}")
+    
+    # Check for critical errors that require restart
+    if any(critical in error_msg.lower() for critical in ['connection', 'timeout', 'ssl', 'socket']):
+        logger.error("Critical connection error detected, scheduling restart")
+        asyncio.create_task(restart_bot_gracefully())
 
 @bot.event
 async def on_command_error(ctx, error):
@@ -454,14 +558,86 @@ async def on_command_error(ctx, error):
     except Exception as e:
         logger.error(f"Failed to send error message: {e}")
 
+@tasks.loop(minutes=5)
+async def watchdog_timer():
+    """Watchdog timer to detect if bot is stuck or unresponsive"""
+    global last_heartbeat, watchdog_enabled
+    
+    if not watchdog_enabled:
+        return
+        
+    try:
+        # Check if bot is responsive
+        if not bot.is_ready():
+            logger.warning("Watchdog: Bot is not ready")
+            return
+            
+        # Check heartbeat age
+        heartbeat_age = (datetime.now() - last_heartbeat).total_seconds() / 60
+        
+        # If heartbeat is too old, bot might be stuck
+        if heartbeat_age > 30:
+            logger.error(f"Watchdog: Bot appears stuck (heartbeat {heartbeat_age:.1f} min old)")
+            await restart_bot_gracefully()
+            
+        # Check bot latency
+        if bot.latency > 5.0:  # 5 second latency is very bad
+            logger.error(f"Watchdog: Extremely high latency detected: {bot.latency*1000:.1f}ms")
+            await restart_bot_gracefully()
+            
+    except Exception as e:
+        logger.error(f"Watchdog error: {e}")
+
+async def restart_bot_gracefully():
+    """Gracefully restart the bot"""
+    global watchdog_enabled, restart_count
+    
+    if restart_count >= max_restarts:
+        logger.error("Max restarts reached, not restarting")
+        return
+        
+    try:
+        logger.info("Initiating graceful bot restart...")
+        watchdog_enabled = False  # Disable watchdog during restart
+        
+        # Stop all tasks
+        if keep_alive.is_running():
+            keep_alive.stop()
+        if system_monitor.is_running():
+            system_monitor.stop()
+        if watchdog_timer.is_running():
+            watchdog_timer.stop()
+            
+        # Close bot connection
+        if not bot.is_closed():
+            await bot.close()
+            
+        # Wait a bit
+        await asyncio.sleep(5)
+        
+        # Restart bot
+        restart_count += 1
+        logger.info(f"Restarting bot (restart #{restart_count})")
+        
+        # Re-enable watchdog
+        watchdog_enabled = True
+        
+        # Start bot again
+        await bot.start(discord_token)
+        
+    except Exception as e:
+        logger.error(f"Error during graceful restart: {e}")
+        # Fall back to process restart
+        os._exit(1)
+
 async def run_bot_with_restart():
     """Run the bot with automatic restart on failure"""
-    max_restarts = 5
-    restart_count = 0
+    global restart_count, bot_start_time
     
     while restart_count < max_restarts:
         try:
             logger.info(f"Starting bot (attempt {restart_count + 1}/{max_restarts})")
+            bot_start_time = datetime.now()
             await bot.start(discord_token)
         except discord.LoginFailure:
             logger.error("Invalid Discord token - cannot restart")
@@ -475,11 +651,17 @@ async def run_bot_with_restart():
                 wait_time = min(60 * restart_count, 300)  # Max 5 minutes
                 logger.info(f"Restarting in {wait_time} seconds...")
                 await asyncio.sleep(wait_time)
+                
+                # Reset bot state before restart
+                if not bot.is_closed():
+                    await bot.close()
             else:
                 logger.error("Max restart attempts reached - stopping")
                 break
     
     logger.error("Bot stopped after multiple failures")
+    # If all restarts failed, exit process to let hosting service restart
+    os._exit(1)
 
 if __name__ == '__main__':
     # Check for required environment variables
